@@ -120,6 +120,9 @@ func (s *Server) handleStream(writer http.ResponseWriter, request *http.Request)
 		failWith(writer, http.StatusBadGateway, *problem, result)
 		return
 	}
+	if result.Backend == "dvb" && dvbSettleEnabled() {
+		prefix = settleFront(request.Context(), stream, prefix)
+	}
 
 	writer.Header().Set("Content-Type", "video/mp2t")
 	// The chosen tuner, so a caller that did not name one can ask after it while
