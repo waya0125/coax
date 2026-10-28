@@ -16,12 +16,16 @@ import (
 // Experiment for issue #3: hold the front of a dvb stream back until the
 // demodulator has gone a while without flagging a packet, and start the
 // response just after the last flagged one. Nothing clean is thrown away;
-// only the damaged head is.
+// only the damaged head is. A stream that never settles -- a channel that is
+// simply weak -- is handed over whole once the limit passes, exactly as it
+// would have been without this step.
 const (
 	settleCleanPackets = 2000 // about 180 ms of an ISDB-T multiplex
-	settleLimit        = 2 * time.Second
 	packetSize         = 188
 )
+
+// settleLimit is a variable only so a test can shorten it.
+var settleLimit = 2 * time.Second
 
 func dvbSettleEnabled() bool { return os.Getenv("COAXD_DVB_SETTLE") != "0" }
 
@@ -40,11 +44,19 @@ func settleFront(ctx context.Context, stream device.Stream, prefix []byte) []byt
 	data := prefix
 	buffer := make([]byte, readSize)
 	deadline := time.Now().Add(settleLimit)
-	scanned, keepFrom, clean := -1, 0, 0
+	scanned, keepFrom, clean, firstAligned := -1, 0, 0, 0
+	// whole is everything read so far from the first aligned packet: what is
+	// handed over when the stream does not settle.
+	whole := func() []byte {
+		if scanned < 0 {
+			return data
+		}
+		return data[firstAligned:]
+	}
 	for {
 		if scanned < 0 {
 			if at := alignPackets(data, 0); at >= 0 {
-				scanned, keepFrom = at, at
+				scanned, keepFrom, firstAligned = at, at, at
 			}
 		}
 		for scanned >= 0 && scanned+packetSize <= len(data) {
@@ -68,7 +80,9 @@ func settleFront(ctx context.Context, stream device.Stream, prefix []byte) []byt
 			}
 		}
 		if ctx.Err() != nil || time.Now().After(deadline) {
-			return data[keepFrom:]
+			// Never settled: hand over all of it rather than lose the front
+			// of a channel that is weak from the start.
+			return whole()
 		}
 		read, err := stream.Read(ctx, buffer)
 		if read > 0 {
@@ -76,11 +90,11 @@ func settleFront(ctx context.Context, stream device.Stream, prefix []byte) []byt
 			continue
 		}
 		if err != nil && !errors.Is(err, receiver.ErrWouldBlock) && !errors.Is(err, device.ErrWouldBlock) {
-			return data[keepFrom:]
+			return whole()
 		}
 		select {
 		case <-ctx.Done():
-			return data[keepFrom:]
+			return whole()
 		case <-time.After(idlePoll):
 		}
 	}
